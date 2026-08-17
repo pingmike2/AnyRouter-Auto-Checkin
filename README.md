@@ -12,6 +12,7 @@
 | SESSION            | ✅ 必填  | SESSION 在cookie里获取，获取方式见下图，30天手动更新一下secret|
 | TG_BOT_TOKEN       | ❌ 可选  | Telegram Bot Token（用于发送通知）                     |
 | TG_CHAT_ID         | ❌ 可选  | Telegram Chat ID（接收通知的用户或群组 ID）             |
+| PROXY_NODE         | ❌ 可选  | 代理节点（socks5://user:pass@host:port 等）。muyuan.do 有 Cloudflare 盾，GitHub Actions 数据中心 IP 可能被拦，配了代理走 gost 本地转发访问 |
 
 ━━━━━━━━━━━━━━━━━━━━━━
 

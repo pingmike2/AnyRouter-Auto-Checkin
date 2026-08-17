@@ -19,6 +19,7 @@ USER_ID      = os.getenv("USER_ID") or ""  # 用户ID,必填,登录后右上角�
 SESSION      = os.getenv("SESSION") or ""  # session必填,登录后F12或右键检查菜单进去,选择应用程序或Appcations栏,找到cookie,右边找到session的值
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""  # Telegram bot token,不需要通知可以留空
 TG_CHAT_ID   = os.getenv("TG_CHAT_ID") or ""    # Telegram chat id
+PROXY_SOCKS5 = os.getenv("PROXY_SOCKS5") or ""  # 可选: socks5 代理(gost 本地转发),如 socks5://127.0.0.1:1081
 
 SITE_URL = "https://muyuan.do"
 SESSION_TTL_DAYS = 30  # Session 有效期 30 天，剩余 < 3 天则更新
@@ -137,6 +138,14 @@ def send_telegram(message: str) -> bool:
         return False
 
 # WAF Cookie 获取
+def make_session() -> "requests.Session":
+    """创建 curl_cffi Session：带 Chrome TLS 指纹 + 可选 socks5 代理。"""
+    session = requests.Session(impersonate="chrome")
+    if PROXY_SOCKS5:
+        session.proxies = {"http": PROXY_SOCKS5, "https": PROXY_SOCKS5}
+        log("INFO", f"使用代理: {PROXY_SOCKS5}")
+    return session
+
 def get_waf_cookies() -> dict:
     """
     获取 Cloudflare WAF Cookie，两种途径：
@@ -151,7 +160,7 @@ def get_waf_cookies() -> dict:
 
     # ---------- 途径 1：curl_cffi 直接访问（首选，快） ----------
     try:
-        s = requests.Session(impersonate="chrome")
+        s = make_session()
         resp = s.get(f"{SITE_URL}/login", timeout=30)
         log("INFO", f"curl_cffi 访问登录页: HTTP {resp.status_code}")
         for cookie in s.cookies:
@@ -342,8 +351,9 @@ def run_checkin():
 
     # ---------- Step 2: 构建 HTTP Session ----------
     # curl_cffi 的 requests.Session：impersonate="chrome" 提供 Chrome TLS 指纹，
-    # 可过 Cloudflare "Just a moment" JS 挑战（无需真实浏览器）。
-    session = requests.Session(impersonate="chrome")
+    # 可过 Cloudflare "Just a moment" JS 挑战（无需真实浏览器）；
+    # 配了 PROXY_SOCKS5 则所有请求走 gost 本地代理。
+    session = make_session()
 
     # 设置所有 Cookie: WAF Cookie + Session Cookie + user_id
     all_cookies = {}
