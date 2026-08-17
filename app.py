@@ -10,9 +10,9 @@ import traceback
 from datetime import datetime, timezone, timedelta
 # curl_cffi 带 Chrome TLS 指纹，可过 Cloudflare "Just a moment" challenge。
 # 用法与 requests.Session 基本一致（session.get/post 同签名），
-# 只在 WAF 兜底时用 playwright（见 get_waf_cookies）。
+# 过盾走 seleniumbase UC 模式（真实 Chrome），见 get_cf_cookies_via_sb。
 from curl_cffi import requests
-from playwright.sync_api import sync_playwright
+from seleniumbase import SB
 
 # 环境变量配置(私库可直接在双引号内填写,session建议填写secrets,需要自动更新)
 USER_ID      = os.getenv("USER_ID") or ""  # 用户ID,必填,登录后右上角个人设置里进去就看到ID了,一般是6位数
@@ -20,6 +20,7 @@ SESSION      = os.getenv("SESSION") or ""  # session必填,登录后F12或右键
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""  # Telegram bot token,不需要通知可以留空
 TG_CHAT_ID   = os.getenv("TG_CHAT_ID") or ""    # Telegram chat id
 PROXY_SOCKS5 = os.getenv("PROXY_SOCKS5") or ""  # 可选: socks5 代理(gost 本地转发),如 socks5://127.0.0.1:1081
+CF_CLEARANCE = os.getenv("CF_CLEARANCE") or ""  # 可选: cf_clearance cookie(SB 过盾失败时兜底)
 
 SITE_URL = "https://muyuan.do"
 SESSION_TTL_DAYS = 30  # Session 有效期 30 天，剩余 < 3 天则更新
@@ -148,84 +149,60 @@ def make_session() -> "requests.Session":
 
 def get_waf_cookies() -> dict:
     """
-    获取 Cloudflare WAF Cookie，两种途径：
-    1. 首选 curl_cffi（带 Chrome TLS 指纹）直接访问登录页，自动通过
-       Cloudflare "Just a moment" JS 挑战，从响应 cookie 里取 WAF cookie；
-    2. 兜底：用 Playwright 无头浏览器访问（部分 CF 配置需要真实 JS 执行）。
-    WAF Cookie 包括: acw_tc, cdn_sec_tc, acw_sc__v2 等。
+    用 seleniumbase UC 模式（真实 Chrome，stealth）访问登录页，自动过
+    Cloudflare "Just a moment" 挑战，提取全部 cookie（cf_clearance、
+    session、user_id 等）返回。
+
+    必须走代理（PROXY_SOCKS5）：cf_clearance 绑定签发 IP，只有
+    curl_cffi/API 也走同一代理 IP 时才有效。
     """
-    log("INFO", f"获取 WAF Cookie（访问 {SITE_URL}/login）...")
+    if not PROXY_SOCKS5:
+        log("ERROR", "过盾需要代理（PROXY_SOCKS5 未配置），请配 PROXY_NODE")
+        return {}
 
-    waf_cookies = {}
+    log("INFO", f"[SB] 启动真实 Chrome 过盾（代理 {PROXY_SOCKS5}）...")
+    all_cookies: dict = {}
 
-    # ---------- 途径 1：curl_cffi 直接访问（首选，快） ----------
     try:
-        s = make_session()
-        resp = s.get(f"{SITE_URL}/login", timeout=30)
-        log("INFO", f"curl_cffi 访问登录页: HTTP {resp.status_code}")
-        for cookie in s.cookies:
-            if cookie.name in WAF_COOKIE_NAMES and cookie.value:
-                waf_cookies[cookie.name] = cookie.value
-        if waf_cookies:
-            log("INFO", f"✅ curl_cffi 获取到 {len(waf_cookies)} 个 WAF Cookie: {list(waf_cookies.keys())}")
-            return waf_cookies
-        # 也可能 CF 把 cookie 放在 set-cookie 里但名字不在白名单——全量收集非敏感 cookie
-        for cookie in s.cookies:
-            if cookie.name and cookie.value and cookie.name not in ("session", "user_id"):
-                if cookie.name not in waf_cookies:
-                    waf_cookies[cookie.name] = cookie.value
-        if waf_cookies:
-            log("INFO", f"curl_cffi 获取到非标准 WAF Cookie: {list(waf_cookies.keys())}")
-            return waf_cookies
-        log("WARN", "curl_cffi 未获取到 WAF Cookie，尝试 Playwright 兜底...")
-    except Exception as e:
-        log("WARN", f"curl_cffi 获取 WAF Cookie 失败: {e}，尝试 Playwright 兜底...")
+        with SB(
+            uc=True,                # undetected Chrome 模式
+            headless2=True,         # 无头（优化版）
+            proxy=PROXY_SOCKS5,     # 走 gost 本地代理 → 乌克兰家宽出口
+            incognito=True,
+            disable_csp=True,
+            user_data_dir=None,
+        ) as sb:
+            sb.open(f"{SITE_URL}/login")
+            sb.wait_for_timeout(8000)  # 等 CF 挑战自动完成
 
-    # ---------- 途径 2：Playwright 无头浏览器（兜底） ----------
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
-            try:
-                page.goto(f"{SITE_URL}/login", wait_until="domcontentloaded", timeout=30000)
-            except Exception as e:
-                log("WARN", f"Playwright 访问登录页失败: {e}")
-            # 等待 CF challenge 完成 & cookie 下发
-            for _ in range(4):
-                page.wait_for_timeout(5000)
-                cookies = context.cookies()
-                for cookie in cookies:
-                    name = cookie.get("name")
-                    value = cookie.get("value")
-                    if name in WAF_COOKIE_NAMES and value:
-                        waf_cookies[name] = value
-                if waf_cookies:
+            # 轮询等过盾：最多 60s
+            for _ in range(12):
+                title = sb.get_title() or ""
+                if "Just a moment" not in title and "Attention" not in title:
                     break
-            browser.close()
+                sb.wait_for_timeout(5000)
+
+            log("INFO", f"[SB] 页面标题: {sb.get_title()}")
+            for cookie in sb.driver.get_cookies():
+                name = cookie.get("name", "")
+                value = cookie.get("value", "")
+                if name and value:
+                    all_cookies[name] = value
+                    if name in ("cf_clearance", "session", "user_id"):
+                        log("INFO", f"[SB] 获取到关键 cookie: {name}")
+
+            sb.quit()
     except Exception as e:
-        log("WARN", f"Playwright 兜底失败: {e}")
+        log("WARN", f"[SB] 过盾失败: {e}")
 
-    if waf_cookies:
-        log("INFO", f"获取到 {len(waf_cookies)} 个 WAF Cookie: {list(waf_cookies.keys())}")
+    if not all_cookies:
+        log("WARN", "[SB] 未获取到任何 cookie（CF 盾可能未过）")
     else:
-        log("WARN", "未获取到 WAF Cookie（API 请求将不带 WAF cookie 尝试）")
+        log("INFO", f"[SB] 共获取 {len(all_cookies)} 个 cookie: {list(all_cookies.keys())}")
+        if "cf_clearance" in all_cookies:
+            log("INFO", "[SB] ✅ cf_clearance 获取成功，盾已过")
 
-    return waf_cookies
+    return all_cookies
 
 # API 调用
 def build_headers() -> dict:
@@ -360,6 +337,8 @@ def run_checkin():
     all_cookies.update(waf_cookies)
     all_cookies["session"] = SESSION
     all_cookies["user_id"] = USER_ID
+    if CF_CLEARANCE and "cf_clearance" not in all_cookies:
+        all_cookies["cf_clearance"] = CF_CLEARANCE  # SB 过盾失败时用配置的兜底
 
     for name, value in all_cookies.items():
         session.cookies.set(name, value, domain="muyuan.do", path="/")

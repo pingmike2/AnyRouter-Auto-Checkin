@@ -29,11 +29,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ---------- 安装 Python 依赖 和 Playwright 浏览器  ----------
+      # ---------- 安装 Python 依赖 和 浏览器 ----------
       - name: Install Python dependencies
         run: |
-          pip install curl_cffi requests playwright pynacl
-          playwright install --with-deps chromium
+          pip install curl_cffi requests seleniumbase pynacl
 
       # ---------- 安装并启动 gost 代理（可选） ----------
       # PROXY_NODE secret 配了就走代理访问 muyuan.do（过 CF 盾）；
@@ -73,12 +72,14 @@ jobs:
 
       # ---------- 运行领币脚本 ----------
       - name: Run check-in script
+        timeout-minutes: 20
         env:
           USER_ID: ${{ secrets.USER_ID }}
           SESSION: ${{ secrets.SESSION }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           PROXY_SOCKS5: ${{ env.PROXY_SOCKS5 }}
+          CF_CLEARANCE: ${{ secrets.CF_CLEARANCE }}
         run: python app.py
         
       - name: 🧹 clear old run jobs
