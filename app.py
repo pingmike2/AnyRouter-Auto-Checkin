@@ -17,7 +17,7 @@ SESSION      = os.getenv("SESSION") or ""  # session必填,登录后F12或右键
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""  # Telegram bot token,不需要通知可以留空
 TG_CHAT_ID   = os.getenv("TG_CHAT_ID") or ""    # Telegram chat id
 
-SITE_URL = "https://anyrouter.top"
+SITE_URL = "https://muyuan.do"
 SESSION_TTL_DAYS = 30  # Session 有效期 30 天，剩余 < 3 天则更新
 SESSION_THRESHOLD_DAYS = 3
 QUOTA_PER_DOLLAR = 500000 
@@ -298,7 +298,7 @@ def run_checkin():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     log("INFO", "=" * 50)
-    log("INFO", "Anyrouter 领币脚本启动")
+    log("INFO", "Muyuan 领币脚本启动")
     log("INFO", f"时间: {now_str}")
     log("INFO", f"用户 ID: {USER_ID}")
     log("INFO", "=" * 50)
@@ -320,7 +320,7 @@ def run_checkin():
     all_cookies["user_id"] = USER_ID
 
     for name, value in all_cookies.items():
-        session.cookies.set(name, value, domain="anyrouter.top", path="/")
+        session.cookies.set(name, value, domain="muyuan.do", path="/")
 
     log("INFO", f"已设置 {len(all_cookies)} 个 Cookie: {list(all_cookies.keys())}")
 
@@ -333,7 +333,7 @@ def run_checkin():
     if not user_info_1:
         log("ERROR", "API 验证失败，Session 可能已过期")
         send_telegram(
-            f"❌ <b>Anyrouter 登录失败</b>\n"
+            f"❌ <b>Muyuan 登录失败</b>\n"
             f"👤 账户: {USER_ID}\n"
             f"⏱️ 时间: {now_str}\n"
             f"📝 原因: Session 已过期，请尽快更新 SESSION"
@@ -389,7 +389,7 @@ def run_checkin():
 
     # ---------- Step 9: 发送 Telegram 通知 ----------
     message = (
-        f"🎁 <b>Anyrouter 签到通知</b>\n\n"
+        f"🎁 <b>Muyuan 签到通知</b>\n\n"
         f"👤 登录账户: {USER_ID}\n"
         f"💰 昨日余额: {first_balance}\n"
         f"💰 当前余额: {second_balance}\n"
@@ -412,7 +412,7 @@ def main():
         log("ERROR", f"脚本执行出错: {error_msg}")
         log("ERROR", traceback.format_exc())
         send_telegram(
-            f"❌ <b>Anyrouter 脚本异常</b>\n"
+            f"❌ <b>Muyuan 脚本异常</b>\n"
             f"👤 账户: {USER_ID}\n"
             f"⏱️ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"📝 错误: {error_msg}"
