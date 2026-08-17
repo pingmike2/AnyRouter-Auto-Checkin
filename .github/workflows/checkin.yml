@@ -29,7 +29,7 @@ jobs:
       # ---------- 安装 Python 依赖 和 Playwright 浏览器  ----------
       - name: Install Python dependencies
         run: |
-          pip install requests playwright pynacl
+          pip install curl_cffi requests playwright pynacl
           playwright install --with-deps chromium
 
       # ---------- 运行领币脚本 ----------

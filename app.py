@@ -6,9 +6,12 @@ import base64
 import json
 import time
 import subprocess
-import requests
 import traceback
 from datetime import datetime, timezone, timedelta
+# curl_cffi 带 Chrome TLS 指纹，可过 Cloudflare "Just a moment" challenge。
+# 用法与 requests.Session 基本一致（session.get/post 同签名），
+# 只在 WAF 兜底时用 playwright（见 get_waf_cookies）。
+from curl_cffi import requests
 from playwright.sync_api import sync_playwright
 
 # 环境变量配置(私库可直接在双引号内填写,session建议填写secrets,需要自动更新)
@@ -136,55 +139,82 @@ def send_telegram(message: str) -> bool:
 # WAF Cookie 获取
 def get_waf_cookies() -> dict:
     """
-    使用 Playwright 浏览器访问登录页面，获取 WAF Cookie。
-    WAF Cookie 包括: acw_tc, cdn_sec_tc, acw_sc__v2
+    获取 Cloudflare WAF Cookie，两种途径：
+    1. 首选 curl_cffi（带 Chrome TLS 指纹）直接访问登录页，自动通过
+       Cloudflare "Just a moment" JS 挑战，从响应 cookie 里取 WAF cookie；
+    2. 兜底：用 Playwright 无头浏览器访问（部分 CF 配置需要真实 JS 执行）。
+    WAF Cookie 包括: acw_tc, cdn_sec_tc, acw_sc__v2 等。
     """
-    log("INFO", f"使用浏览器获取 WAF Cookie（访问 {SITE_URL}/login）...")
+    log("INFO", f"获取 WAF Cookie（访问 {SITE_URL}/login）...")
 
     waf_cookies = {}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
+    # ---------- 途径 1：curl_cffi 直接访问（首选，快） ----------
+    try:
+        s = requests.Session(impersonate="chrome")
+        resp = s.get(f"{SITE_URL}/login", timeout=30)
+        log("INFO", f"curl_cffi 访问登录页: HTTP {resp.status_code}")
+        for cookie in s.cookies:
+            if cookie.name in WAF_COOKIE_NAMES and cookie.value:
+                waf_cookies[cookie.name] = cookie.value
+        if waf_cookies:
+            log("INFO", f"✅ curl_cffi 获取到 {len(waf_cookies)} 个 WAF Cookie: {list(waf_cookies.keys())}")
+            return waf_cookies
+        # 也可能 CF 把 cookie 放在 set-cookie 里但名字不在白名单——全量收集非敏感 cookie
+        for cookie in s.cookies:
+            if cookie.name and cookie.value and cookie.name not in ("session", "user_id"):
+                if cookie.name not in waf_cookies:
+                    waf_cookies[cookie.name] = cookie.value
+        if waf_cookies:
+            log("INFO", f"curl_cffi 获取到非标准 WAF Cookie: {list(waf_cookies.keys())}")
+            return waf_cookies
+        log("WARN", "curl_cffi 未获取到 WAF Cookie，尝试 Playwright 兜底...")
+    except Exception as e:
+        log("WARN", f"curl_cffi 获取 WAF Cookie 失败: {e}，尝试 Playwright 兜底...")
 
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-            ),
-        )
-
-        page = context.new_page()
-
-        try:
-            page.goto(f"{SITE_URL}/login", wait_until="domcontentloaded", timeout=30000)
-        except Exception as e:
-            log("WARN", f"访问登录页面失败: {e}")
-
-        # 等待 WAF Cookie 生成
-        page.wait_for_timeout(3000)
-
-        cookies = context.cookies()
-        for cookie in cookies:
-            name = cookie.get("name")
-            value = cookie.get("value")
-            if name in WAF_COOKIE_NAMES and value:
-                waf_cookies[name] = value
-
-        browser.close()
+    # ---------- 途径 2：Playwright 无头浏览器（兜底） ----------
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            try:
+                page.goto(f"{SITE_URL}/login", wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log("WARN", f"Playwright 访问登录页失败: {e}")
+            # 等待 CF challenge 完成 & cookie 下发
+            for _ in range(4):
+                page.wait_for_timeout(5000)
+                cookies = context.cookies()
+                for cookie in cookies:
+                    name = cookie.get("name")
+                    value = cookie.get("value")
+                    if name in WAF_COOKIE_NAMES and value:
+                        waf_cookies[name] = value
+                if waf_cookies:
+                    break
+            browser.close()
+    except Exception as e:
+        log("WARN", f"Playwright 兜底失败: {e}")
 
     if waf_cookies:
         log("INFO", f"获取到 {len(waf_cookies)} 个 WAF Cookie: {list(waf_cookies.keys())}")
     else:
-        log("WARN", "未获取到 WAF Cookie")
+        log("WARN", "未获取到 WAF Cookie（API 请求将不带 WAF cookie 尝试）")
 
     return waf_cookies
 
@@ -311,7 +341,9 @@ def run_checkin():
     waf_cookies = get_waf_cookies()
 
     # ---------- Step 2: 构建 HTTP Session ----------
-    session = requests.Session()
+    # curl_cffi 的 requests.Session：impersonate="chrome" 提供 Chrome TLS 指纹，
+    # 可过 Cloudflare "Just a moment" JS 挑战（无需真实浏览器）。
+    session = requests.Session(impersonate="chrome")
 
     # 设置所有 Cookie: WAF Cookie + Session Cookie + user_id
     all_cookies = {}
