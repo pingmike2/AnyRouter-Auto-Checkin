@@ -173,14 +173,14 @@ def get_waf_cookies() -> dict:
             user_data_dir=None,
         ) as sb:
             sb.open(f"{SITE_URL}/login")
-            sb.wait_for_timeout(8000)  # 等 CF 挑战自动完成
+            sb.sleep(8)  # 等 CF 挑战自动完成
 
             # 轮询等过盾：最多 60s
             for _ in range(12):
                 title = sb.get_title() or ""
                 if "Just a moment" not in title and "Attention" not in title:
                     break
-                sb.wait_for_timeout(5000)
+                sb.sleep(5)
 
             log("INFO", f"[SB] 页面标题: {sb.get_title()}")
             for cookie in sb.driver.get_cookies():
