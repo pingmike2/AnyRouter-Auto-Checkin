@@ -1,9 +1,6 @@
-name: Muyuan Daily Check-in
+name: Ayrouter Daily Check-in
 
 on:
-  push:
-    branches:
-      - main
   schedule:
     - cron: '0 2 * * *'
   # 支持手动触发
@@ -29,57 +26,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ---------- 安装 Python 依赖 和 浏览器 ----------
+      # ---------- 安装 Python 依赖 和 Playwright 浏览器  ----------
       - name: Install Python dependencies
         run: |
-          pip install curl_cffi requests seleniumbase pynacl
-
-      # ---------- 安装并启动 gost 代理（可选） ----------
-      # PROXY_NODE secret 配了就走代理访问 muyuan.do（过 CF 盾）；
-      # 没配则直连。
-      - name: Setup gost proxy
-        env:
-          PROXY_NODE: ${{ secrets.PROXY_NODE }}
-        run: |
-          if [ -z "$PROXY_NODE" ]; then
-            echo "[INFO] 未配置 PROXY_NODE，直连模式"
-            exit 0
-          fi
-          echo "[INFO] 下载 gost..."
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
-          mv gost-linux-amd64-2.11.5 gost && chmod +x gost
-
-          echo "[INFO] 启动 gost 本地代理 127.0.0.1:1081 -> $PROXY_NODE"
-          ./gost -L socks5://:1081 -F "$PROXY_NODE" > gost.log 2>&1 &
-          sleep 3
-
-          echo "[INFO] 测试代理连接..."
-          for i in 1 2 3 4 5; do
-            if curl -x socks5://127.0.0.1:1081 -s --max-time 15 https://api.ipify.org > /dev/null 2>&1; then
-              echo "[INFO] ✅ gost 代理连接成功"
-              echo "PROXY_SOCKS5=socks5://127.0.0.1:1081" >> $GITHUB_ENV
-              exit 0
-            fi
-            echo "[WARN] 尝试 $i/5..."
-            sleep 3
-          done
-
-          echo "[ERROR] ❌ gost 代理连接失败"
-          echo "--- gost 日志 ---"
-          cat gost.log
-          exit 1
+          pip install requests playwright pynacl
+          playwright install --with-deps chromium
 
       # ---------- 运行领币脚本 ----------
       - name: Run check-in script
-        timeout-minutes: 20
         env:
           USER_ID: ${{ secrets.USER_ID }}
           SESSION: ${{ secrets.SESSION }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          PROXY_SOCKS5: ${{ env.PROXY_SOCKS5 }}
-          CF_CLEARANCE: ${{ secrets.CF_CLEARANCE }}
         run: python app.py
         
       - name: 🧹 clear old run jobs
