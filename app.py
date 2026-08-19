@@ -6,23 +6,18 @@ import base64
 import json
 import time
 import subprocess
+import requests
 import traceback
 from datetime import datetime, timezone, timedelta
-# curl_cffi 带 Chrome TLS 指纹，可过 Cloudflare "Just a moment" challenge。
-# 用法与 requests.Session 基本一致（session.get/post 同签名），
-# 过盾走 seleniumbase UC 模式（真实 Chrome），见 get_cf_cookies_via_sb。
-from curl_cffi import requests
-from seleniumbase import SB
+from playwright.sync_api import sync_playwright
 
 # 环境变量配置(私库可直接在双引号内填写,session建议填写secrets,需要自动更新)
 USER_ID      = os.getenv("USER_ID") or ""  # 用户ID,必填,登录后右上角个人设置里进去就看到ID了,一般是6位数
 SESSION      = os.getenv("SESSION") or ""  # session必填,登录后F12或右键检查菜单进去,选择应用程序或Appcations栏,找到cookie,右边找到session的值
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""  # Telegram bot token,不需要通知可以留空
 TG_CHAT_ID   = os.getenv("TG_CHAT_ID") or ""    # Telegram chat id
-PROXY_SOCKS5 = os.getenv("PROXY_SOCKS5") or ""  # 可选: socks5 代理(gost 本地转发),如 socks5://127.0.0.1:1081
-CF_CLEARANCE = os.getenv("CF_CLEARANCE") or ""  # 可选: cf_clearance cookie(SB 过盾失败时兜底)
 
-SITE_URL = "https://muyuan.do"
+SITE_URL = "https://anyrouter.top"
 SESSION_TTL_DAYS = 30  # Session 有效期 30 天，剩余 < 3 天则更新
 SESSION_THRESHOLD_DAYS = 3
 QUOTA_PER_DOLLAR = 500000 
@@ -139,70 +134,59 @@ def send_telegram(message: str) -> bool:
         return False
 
 # WAF Cookie 获取
-def make_session() -> "requests.Session":
-    """创建 curl_cffi Session：带 Chrome TLS 指纹 + 可选 socks5 代理。"""
-    session = requests.Session(impersonate="chrome")
-    if PROXY_SOCKS5:
-        session.proxies = {"http": PROXY_SOCKS5, "https": PROXY_SOCKS5}
-        log("INFO", f"使用代理: {PROXY_SOCKS5}")
-    return session
-
 def get_waf_cookies() -> dict:
     """
-    用 seleniumbase UC 模式（真实 Chrome，stealth）访问登录页，自动过
-    Cloudflare "Just a moment" 挑战，提取全部 cookie（cf_clearance、
-    session、user_id 等）返回。
-
-    必须走代理（PROXY_SOCKS5）：cf_clearance 绑定签发 IP，只有
-    curl_cffi/API 也走同一代理 IP 时才有效。
+    使用 Playwright 浏览器访问登录页面，获取 WAF Cookie。
+    WAF Cookie 包括: acw_tc, cdn_sec_tc, acw_sc__v2
     """
-    if not PROXY_SOCKS5:
-        log("ERROR", "过盾需要代理（PROXY_SOCKS5 未配置），请配 PROXY_NODE")
-        return {}
+    log("INFO", f"使用浏览器获取 WAF Cookie（访问 {SITE_URL}/login）...")
 
-    log("INFO", f"[SB] 启动真实 Chrome 过盾（代理 {PROXY_SOCKS5}）...")
-    all_cookies: dict = {}
+    waf_cookies = {}
 
-    try:
-        with SB(
-            uc=True,                # undetected Chrome 模式
-            headless2=True,         # 无头（优化版）
-            proxy=PROXY_SOCKS5,     # 走 gost 本地代理 → 乌克兰家宽出口
-            incognito=True,
-            disable_csp=True,
-            user_data_dir=None,
-        ) as sb:
-            sb.open(f"{SITE_URL}/login")
-            sb.sleep(8)  # 等 CF 挑战自动完成
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
 
-            # 轮询等过盾：最多 60s
-            for _ in range(12):
-                title = sb.get_title() or ""
-                if "Just a moment" not in title and "Attention" not in title:
-                    break
-                sb.sleep(5)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+            ),
+        )
 
-            log("INFO", f"[SB] 页面标题: {sb.get_title()}")
-            for cookie in sb.driver.get_cookies():
-                name = cookie.get("name", "")
-                value = cookie.get("value", "")
-                if name and value:
-                    all_cookies[name] = value
-                    if name in ("cf_clearance", "session", "user_id"):
-                        log("INFO", f"[SB] 获取到关键 cookie: {name}")
+        page = context.new_page()
 
-            sb.quit()
-    except Exception as e:
-        log("WARN", f"[SB] 过盾失败: {e}")
+        try:
+            page.goto(f"{SITE_URL}/login", wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            log("WARN", f"访问登录页面失败: {e}")
 
-    if not all_cookies:
-        log("WARN", "[SB] 未获取到任何 cookie（CF 盾可能未过）")
+        # 等待 WAF Cookie 生成
+        page.wait_for_timeout(3000)
+
+        cookies = context.cookies()
+        for cookie in cookies:
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if name in WAF_COOKIE_NAMES and value:
+                waf_cookies[name] = value
+
+        browser.close()
+
+    if waf_cookies:
+        log("INFO", f"获取到 {len(waf_cookies)} 个 WAF Cookie: {list(waf_cookies.keys())}")
     else:
-        log("INFO", f"[SB] 共获取 {len(all_cookies)} 个 cookie: {list(all_cookies.keys())}")
-        if "cf_clearance" in all_cookies:
-            log("INFO", "[SB] ✅ cf_clearance 获取成功，盾已过")
+        log("WARN", "未获取到 WAF Cookie")
 
-    return all_cookies
+    return waf_cookies
 
 # API 调用
 def build_headers() -> dict:
@@ -314,7 +298,7 @@ def run_checkin():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     log("INFO", "=" * 50)
-    log("INFO", "Muyuan 领币脚本启动")
+    log("INFO", "Anyrouter 领币脚本启动")
     log("INFO", f"时间: {now_str}")
     log("INFO", f"用户 ID: {USER_ID}")
     log("INFO", "=" * 50)
@@ -327,21 +311,16 @@ def run_checkin():
     waf_cookies = get_waf_cookies()
 
     # ---------- Step 2: 构建 HTTP Session ----------
-    # curl_cffi 的 requests.Session：impersonate="chrome" 提供 Chrome TLS 指纹，
-    # 可过 Cloudflare "Just a moment" JS 挑战（无需真实浏览器）；
-    # 配了 PROXY_SOCKS5 则所有请求走 gost 本地代理。
-    session = make_session()
+    session = requests.Session()
 
     # 设置所有 Cookie: WAF Cookie + Session Cookie + user_id
     all_cookies = {}
     all_cookies.update(waf_cookies)
     all_cookies["session"] = SESSION
     all_cookies["user_id"] = USER_ID
-    if CF_CLEARANCE and "cf_clearance" not in all_cookies:
-        all_cookies["cf_clearance"] = CF_CLEARANCE  # SB 过盾失败时用配置的兜底
 
     for name, value in all_cookies.items():
-        session.cookies.set(name, value, domain="muyuan.do", path="/")
+        session.cookies.set(name, value, domain="anyrouter.top", path="/")
 
     log("INFO", f"已设置 {len(all_cookies)} 个 Cookie: {list(all_cookies.keys())}")
 
@@ -354,7 +333,7 @@ def run_checkin():
     if not user_info_1:
         log("ERROR", "API 验证失败，Session 可能已过期")
         send_telegram(
-            f"❌ <b>Muyuan 登录失败</b>\n"
+            f"❌ <b>Anyrouter 登录失败</b>\n"
             f"👤 账户: {USER_ID}\n"
             f"⏱️ 时间: {now_str}\n"
             f"📝 原因: Session 已过期，请尽快更新 SESSION"
@@ -410,7 +389,7 @@ def run_checkin():
 
     # ---------- Step 9: 发送 Telegram 通知 ----------
     message = (
-        f"🎁 <b>Muyuan 签到通知</b>\n\n"
+        f"🎁 <b>Anyrouter 签到通知</b>\n\n"
         f"👤 登录账户: {USER_ID}\n"
         f"💰 昨日余额: {first_balance}\n"
         f"💰 当前余额: {second_balance}\n"
@@ -433,7 +412,7 @@ def main():
         log("ERROR", f"脚本执行出错: {error_msg}")
         log("ERROR", traceback.format_exc())
         send_telegram(
-            f"❌ <b>Muyuan 脚本异常</b>\n"
+            f"❌ <b>Anyrouter 脚本异常</b>\n"
             f"👤 账户: {USER_ID}\n"
             f"⏱️ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"📝 错误: {error_msg}"
